@@ -1,0 +1,5 @@
+services:
+  sofascore-mqtt:
+    build: .
+    container_name: sofascore-mqtt
+    restart: unless-stopped
