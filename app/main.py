@@ -1,8 +1,8 @@
 import asyncio
 import json
-import aiohttp
 import yaml
 from asyncio_mqtt import Client, MqttError
+from curl_cffi.requests import AsyncSession
 
 SOFASCORE_HOME = "https://www.sofascore.com/"
 LIVE_URL = "https://api.sofascore.com/api/v1/sport/football/events/live"
@@ -11,7 +11,7 @@ PAGE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -80,21 +80,23 @@ def get_score(ev):
     return f"{hs}:{aw}"
 
 
+def get_status_text(ev):
+    status = ev.get("status", {})
+    status_desc = status.get("description") or status.get("type", "")
+    time_data = ev.get("time", {}) or {}
+    current_period_start = time_data.get("currentPeriodStartTimestamp")
+
+    if status_desc:
+        return status_desc
+    if current_period_start:
+        return "live"
+    return "live"
+
+
 def format_event(ev):
     home = ev.get("homeTeam", {}).get("name", "HOME")
     away = ev.get("awayTeam", {}).get("name", "AWAY")
-    status = ev.get("status", {})
-    status_desc = status.get("description") or status.get("type", "")
-    minute = ev.get("time", {}).get("currentPeriodStartTimestamp")
-
-    if status_desc:
-        suffix = status_desc
-    elif minute:
-        suffix = str(minute)
-    else:
-        suffix = "live"
-
-    return f"{short_name(home)} {get_score(ev)} {short_name(away)} ({suffix})"
+    return f"{short_name(home)} {get_score(ev)} {short_name(away)} ({get_status_text(ev)})"
 
 
 async def publish_json(client, topic, payload, retain=False):
@@ -124,17 +126,17 @@ async def prepare_sofascore_session(session, force=False):
         return
 
     try:
-        async with session.get(
+        resp = await session.get(
             SOFASCORE_HOME,
             headers=PAGE_HEADERS,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            body = await resp.text()
-            print(f"[HTTP INIT] SofaScore homepage status {resp.status}", flush=True)
-            if resp.status != 200:
-                print(f"[HTTP INIT BODY] {body[:300]}", flush=True)
+            timeout=15,
+        )
+        body = resp.text or ""
+        print(f"[HTTP INIT] SofaScore homepage status {resp.status_code}", flush=True)
+        if resp.status_code != 200:
+            print(f"[HTTP INIT BODY] {body[:300]}", flush=True)
 
-            sofascore_session_ready = True
+        sofascore_session_ready = True
 
     except Exception as e:
         print("[HTTP INIT ERROR]", e, flush=True)
@@ -147,26 +149,27 @@ async def fetch_json(session, url, retry=True):
     try:
         await prepare_sofascore_session(session)
 
-        async with session.get(
+        resp = await session.get(
             url,
             headers=API_HEADERS,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                print(f"[HTTP ERROR] {resp.status} {url}", flush=True)
-                print(f"[HTTP BODY] {body[:500]}", flush=True)
+            timeout=15,
+        )
 
-                if resp.status == 403 and retry:
-                    print("[HTTP RETRY] refreshing SofaScore session and retrying once", flush=True)
-                    sofascore_session_ready = False
-                    await prepare_sofascore_session(session, force=True)
-                    await asyncio.sleep(1)
-                    return await fetch_json(session, url, retry=False)
+        if resp.status_code != 200:
+            body = resp.text or ""
+            print(f"[HTTP ERROR] {resp.status_code} {url}", flush=True)
+            print(f"[HTTP BODY] {body[:500]}", flush=True)
 
-                return {}
+            if resp.status_code == 403 and retry:
+                print("[HTTP RETRY] refreshing SofaScore session and retrying once", flush=True)
+                sofascore_session_ready = False
+                await prepare_sofascore_session(session, force=True)
+                await asyncio.sleep(1)
+                return await fetch_json(session, url, retry=False)
 
-            return await resp.json()
+            return {}
+
+        return resp.json()
 
     except Exception as e:
         print("[FETCH ERROR]", e, flush=True)
@@ -192,13 +195,12 @@ async def publish_live_preview(client, events):
     for ev in preview_events:
         home = ev.get("homeTeam", {}).get("name", "HOME")
         away = ev.get("awayTeam", {}).get("name", "AWAY")
-        status = ev.get("status", {})
         item = {
             "id": ev.get("id"),
             "home": home,
             "away": away,
             "score": get_score(ev),
-            "status": status.get("description") or status.get("type", ""),
+            "status": get_status_text(ev),
             "line": format_event(ev),
         }
         items.append(item)
@@ -399,9 +401,7 @@ async def main():
 
                 print(f"Connected to MQTT {MQTT_HOST}:{MQTT_PORT}", flush=True)
 
-                timeout = aiohttp.ClientTimeout(total=15)
-                connector = aiohttp.TCPConnector(ssl=False)
-                async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                async with AsyncSession(impersonate="chrome124", timeout=15) as session:
                     while True:
                         events = await fetch_live_events(session)
                         await publish_live_preview(client, events)
