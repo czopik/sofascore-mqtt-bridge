@@ -40,8 +40,8 @@ with open("config.yaml", "r") as f:
 
 MQTT_HOST = CONFIG["mqtt"]["host"]
 MQTT_PORT = CONFIG["mqtt"]["port"]
-MQTT_USER = CONFIG["mqtt"]["username"]
-MQTT_PASS = CONFIG["mqtt"]["password"]
+MQTT_USER = CONFIG["mqtt"].get("username")
+MQTT_PASS = CONFIG["mqtt"].get("password")
 
 LED_TOPIC = CONFIG.get("led", {}).get("topic", "all")
 TEAMS = CONFIG.get("teams", [])
@@ -52,18 +52,21 @@ LIVE_PREVIEW_ENABLED = LIVE_PREVIEW.get("enabled", True)
 LIVE_PREVIEW_TOPIC = LIVE_PREVIEW.get("topic", "sports/football/live")
 LIVE_PREVIEW_LIMIT = int(LIVE_PREVIEW.get("limit", 5))
 LIVE_PREVIEW_LED = LIVE_PREVIEW.get("led", True)
+
+COUNTRY_SECONDS = float(LIVE_PREVIEW.get("country_seconds", LIVE_PREVIEW.get("context_seconds", 3)))
+LEAGUE_SECONDS = float(LIVE_PREVIEW.get("league_seconds", LIVE_PREVIEW.get("context_seconds", 3)))
 DISPLAY_SECONDS = float(LIVE_PREVIEW.get("display_seconds", 5))
-CONTEXT_SECONDS = float(LIVE_PREVIEW.get("context_seconds", 3))
 BLINK_COUNT = int(LIVE_PREVIEW.get("blink_count", 3))
 BLINK_INTERVAL = float(LIVE_PREVIEW.get("blink_interval", 0.35))
 BLANK_BETWEEN_SECONDS = float(LIVE_PREVIEW.get("blank_between_seconds", 0.25))
-MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 96))
+MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 120))
 SHOW_STATUS_ON_LED = LIVE_PREVIEW.get("show_status_on_led", False)
 NO_LIVE_TEXT = LIVE_PREVIEW.get("no_live_text", "BRAK MECZOW LIVE")
 DISPLAY_WIDTH_CHARS = int(LIVE_PREVIEW.get("display_width_chars", 16))
 STATIC_HOLD_SECONDS = float(LIVE_PREVIEW.get("static_hold_seconds", 3))
 SCROLL_CHARS_PER_SECOND = float(LIVE_PREVIEW.get("scroll_chars_per_second", 5))
 SCROLL_END_PAUSE_SECONDS = float(LIVE_PREVIEW.get("scroll_end_pause_seconds", 1))
+USE_FULL_TEAM_NAMES = LIVE_PREVIEW.get("use_full_team_names", True)
 
 last_scores = {}
 last_all_live_scores = {}
@@ -120,10 +123,6 @@ def normalize_display(text):
     return text
 
 
-def trim_display(text):
-    return normalize_display(text)
-
-
 def calculate_display_seconds(text, minimum_seconds):
     text_len = len(str(text))
     width = max(1, DISPLAY_WIDTH_CHARS)
@@ -143,15 +142,10 @@ def get_score(ev):
 
 
 def get_status_text(ev):
-    status = ev.get("status", {})
+    status = ev.get("status", {}) or {}
     status_desc = status.get("description") or status.get("type", "")
-    time_data = ev.get("time", {}) or {}
-    current_period_start = time_data.get("currentPeriodStartTimestamp")
-
     if status_desc:
         return status_desc
-    if current_period_start:
-        return "live"
     return "live"
 
 
@@ -163,49 +157,41 @@ def get_tournament_info(ev):
     country = category.get("name") or category.get("country", {}).get("name") or ""
     country = COUNTRY_NAMES_PL.get(country, country.upper() if country else "")
 
-    return country, league
+    return normalize_display(country or "INNE"), normalize_display(league or "Liga")
 
 
-def format_event(ev, include_status=True):
-    home = ev.get("homeTeam", {}).get("name", "HOME")
-    away = ev.get("awayTeam", {}).get("name", "AWAY")
-    base = f"{short_name(home)} {get_score(ev)} {short_name(away)}"
-
-    if include_status:
-        return f"{base} ({get_status_text(ev)})"
-    return base
-
-
-def format_context_event(ev):
-    country, league = get_tournament_info(ev)
-    if country and league:
-        return normalize_display(f"{country} - {league}")
-    if league:
-        return normalize_display(league)
-    return normalize_display(country or "MECZ LIVE")
+def get_team_name(name):
+    if USE_FULL_TEAM_NAMES:
+        return name or "???"
+    return short_name(name)
 
 
 def format_score_event(ev):
     home = ev.get("homeTeam", {}).get("name", "HOME")
     away = ev.get("awayTeam", {}).get("name", "AWAY")
-    base = f"{short_name(home)} {get_score(ev)} {short_name(away)}"
+    base = f"{get_team_name(home)} {get_score(ev)} {get_team_name(away)}"
 
     if SHOW_STATUS_ON_LED:
         base = f"{base} ({get_status_text(ev)})"
     return normalize_display(base)
 
 
-def format_full_display_event(ev):
+def format_event(ev, include_status=True):
+    base = format_score_event(ev)
+    if include_status and not SHOW_STATUS_ON_LED:
+        return f"{base} ({get_status_text(ev)})"
+    return base
+
+
+def get_display_parts(ev):
     country, league = get_tournament_info(ev)
     score = format_score_event(ev)
-    prefix = " - ".join(part for part in [country, league] if part)
-    if prefix:
-        return normalize_display(f"{prefix}: {score}")
-    return score
+    return country, league, score
 
 
-def format_display_event(ev):
-    return format_score_event(ev)
+def format_full_display_event(ev):
+    country, league, score = get_display_parts(ev)
+    return normalize_display(f"{country} | {league} | {score}")
 
 
 def enqueue_priority_message(text):
@@ -213,18 +199,17 @@ def enqueue_priority_message(text):
     if not text:
         return
 
-    priority_messages.append((None, text))
+    priority_messages.append((None, None, text))
     priority_signal.set()
     print(f"[DISPLAY PRIORITY QUEUED] {text}", flush=True)
 
 
 def enqueue_priority_event(ev, prefix="GOAL"):
-    context = format_context_event(ev)
-    score = format_score_event(ev)
-    text = normalize_display(f"{prefix} {score}")
-    priority_messages.append((context, text))
+    country, league, score = get_display_parts(ev)
+    priority_score = normalize_display(f"{prefix} {score}")
+    priority_messages.append((country, league, priority_score))
     priority_signal.set()
-    print(f"[DISPLAY PRIORITY QUEUED] {context} -> {text}", flush=True)
+    print(f"[DISPLAY PRIORITY QUEUED] {country} -> {league} -> {priority_score}", flush=True)
 
 
 async def publish_json(client, topic, payload, retain=False):
@@ -232,7 +217,7 @@ async def publish_json(client, topic, payload, retain=False):
         topic,
         json.dumps(payload, ensure_ascii=False),
         qos=0,
-        retain=retain
+        retain=retain,
     )
     print("[MQTT JSON]", topic, payload, flush=True)
 
@@ -242,9 +227,14 @@ async def publish_led(client, text, retain=False):
         LED_TOPIC,
         text,
         qos=1,
-        retain=retain
+        retain=retain,
     )
     print("[MQTT LED]", LED_TOPIC, repr(text), flush=True)
+
+
+async def clear_led(client):
+    await publish_led(client, " ", retain=True)
+    await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
 
 async def prepare_sofascore_session(session, force=False):
@@ -321,9 +311,7 @@ async def publish_live_preview(client, events):
     for ev in preview_events:
         home = ev.get("homeTeam", {}).get("name", "HOME")
         away = ev.get("awayTeam", {}).get("name", "AWAY")
-        country, league = get_tournament_info(ev)
-        context = format_context_event(ev)
-        score = format_score_event(ev)
+        country, league, score_text = get_display_parts(ev)
         item = {
             "id": ev.get("id"),
             "country": country,
@@ -333,10 +321,13 @@ async def publish_live_preview(client, events):
             "score": get_score(ev),
             "status": get_status_text(ev),
             "line": format_event(ev, include_status=True),
-            "display_context": context,
-            "display_context_seconds": round(calculate_display_seconds(context, CONTEXT_SECONDS), 2),
-            "display_score": score,
-            "display_score_seconds": round(calculate_display_seconds(score, DISPLAY_SECONDS), 2),
+            "display_country": country,
+            "display_country_seconds": round(calculate_display_seconds(country, COUNTRY_SECONDS), 2),
+            "display_league": league,
+            "display_league_seconds": round(calculate_display_seconds(league, LEAGUE_SECONDS), 2),
+            "display_score": score_text,
+            "display_score_seconds": round(calculate_display_seconds(score_text, DISPLAY_SECONDS), 2),
+            "display_sequence": [country, league, score_text],
             "display": format_full_display_event(ev),
         }
         items.append(item)
@@ -345,7 +336,7 @@ async def publish_live_preview(client, events):
         "type": "live_preview",
         "count": len(events),
         "shown": len(items),
-        "display_mode": "league_then_score_dynamic_wait",
+        "display_mode": "country_then_league_then_score_separate",
         "display_width_chars": DISPLAY_WIDTH_CHARS,
         "static_hold_seconds": STATIC_HOLD_SECONDS,
         "scroll_chars_per_second": SCROLL_CHARS_PER_SECOND,
@@ -385,7 +376,6 @@ async def detect_live_score_changes(events):
             enqueue_priority_event(ev, prefix="GOAL")
             print(f"[SCORE CHANGE] {key}: {old_score} -> {score}", flush=True)
 
-    # remove finished/disappeared live events from score memory
     for key in list(last_all_live_scores.keys()):
         if key not in seen_keys:
             last_all_live_scores.pop(key, None)
@@ -402,8 +392,7 @@ async def show_text_for_seconds(client, text, seconds, interruptible=True):
         try:
             await asyncio.wait_for(priority_signal.wait(), timeout=seconds)
             priority_signal.clear()
-            await publish_led(client, " ", retain=True)
-            await asyncio.sleep(BLANK_BETWEEN_SECONDS)
+            await clear_led(client)
             return False
         except asyncio.TimeoutError:
             return True
@@ -413,23 +402,47 @@ async def show_text_for_seconds(client, text, seconds, interruptible=True):
 
 
 async def show_text_dynamic(client, text, minimum_seconds, interruptible=True):
+    text = normalize_display(text)
     seconds = calculate_display_seconds(text, minimum_seconds)
     print(f"[DISPLAY WAIT] {seconds:.2f}s for {repr(text)}", flush=True)
     return await show_text_for_seconds(client, text, seconds, interruptible=interruptible)
 
 
+async def show_match_sequence(client, country, league, score, interruptible=True):
+    sequence = [
+        (country, COUNTRY_SECONDS),
+        (league, LEAGUE_SECONDS),
+        (score, DISPLAY_SECONDS),
+    ]
+
+    for text, seconds in sequence:
+        if not text:
+            continue
+
+        completed = await show_text_dynamic(client, text, seconds, interruptible=interruptible)
+        if not completed:
+            return False
+
+        await clear_led(client)
+
+    return True
+
+
 async def show_priority_text(client, message):
     if isinstance(message, tuple):
-        context, text = message
+        country, league, text = message
     else:
-        context, text = None, message
+        country, league, text = None, None, message
 
-    print(f"[DISPLAY PRIORITY] {context or ''} {text}", flush=True)
+    print(f"[DISPLAY PRIORITY] {country or ''} {league or ''} {text}", flush=True)
 
-    if context:
-        await show_text_dynamic(client, context, CONTEXT_SECONDS, interruptible=False)
-        await publish_led(client, " ", retain=True)
-        await asyncio.sleep(BLANK_BETWEEN_SECONDS)
+    if country:
+        await show_text_dynamic(client, country, COUNTRY_SECONDS, interruptible=False)
+        await clear_led(client)
+
+    if league:
+        await show_text_dynamic(client, league, LEAGUE_SECONDS, interruptible=False)
+        await clear_led(client)
 
     for _ in range(BLINK_COUNT):
         await publish_led(client, text, retain=True)
@@ -438,8 +451,7 @@ async def show_priority_text(client, message):
         await asyncio.sleep(BLINK_INTERVAL)
 
     await show_text_dynamic(client, text, DISPLAY_SECONDS, interruptible=False)
-    await publish_led(client, " ", retain=True)
-    await asyncio.sleep(BLANK_BETWEEN_SECONDS)
+    await clear_led(client)
 
 
 async def display_live_rotation(client):
@@ -472,40 +484,26 @@ async def display_live_rotation(client):
             index = 0
 
         ev = events[index]
-        context_text = format_context_event(ev)
-        score_text = format_score_event(ev)
-        context_wait = calculate_display_seconds(context_text, CONTEXT_SECONDS)
+        country, league, score_text = get_display_parts(ev)
+        country_wait = calculate_display_seconds(country, COUNTRY_SECONDS)
+        league_wait = calculate_display_seconds(league, LEAGUE_SECONDS)
         score_wait = calculate_display_seconds(score_text, DISPLAY_SECONDS)
         print(
             f"[DISPLAY ROTATE] {index + 1}/{len(events)} "
-            f"{context_text} ({context_wait:.2f}s) -> {score_text} ({score_wait:.2f}s)",
+            f"{country} ({country_wait:.2f}s) -> "
+            f"{league} ({league_wait:.2f}s) -> "
+            f"{score_text} ({score_wait:.2f}s)",
             flush=True,
         )
         index += 1
 
-        context_completed = await show_text_dynamic(
+        await show_match_sequence(
             client,
-            context_text,
-            CONTEXT_SECONDS,
-            interruptible=True,
-        )
-
-        if not context_completed:
-            continue
-
-        await publish_led(client, " ", retain=True)
-        await asyncio.sleep(BLANK_BETWEEN_SECONDS)
-
-        score_completed = await show_text_dynamic(
-            client,
+            country,
+            league,
             score_text,
-            DISPLAY_SECONDS,
             interruptible=True,
         )
-
-        if score_completed:
-            await publish_led(client, " ", retain=True)
-            await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
 
 async def preload_incidents(session, event_id):
@@ -554,7 +552,7 @@ async def handle_incidents(session, client, team, event_id, score):
                 "team": goal_team,
                 "player": player,
                 "minute": minute,
-                "score": score
+                "score": score,
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/goal", payload)
@@ -571,7 +569,7 @@ async def handle_incidents(session, client, team, event_id, score):
                 "team": card_team,
                 "player": player,
                 "minute": minute,
-                "color": color
+                "color": color,
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/card", payload)
@@ -618,7 +616,7 @@ async def process_team(session, client, team, events):
                 "home": home,
                 "away": away,
                 "score": score,
-                "status": status_desc
+                "status": status_desc,
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
@@ -637,7 +635,7 @@ async def process_team(session, client, team, events):
                 "home": home,
                 "away": away,
                 "score": score,
-                "status": status_desc
+                "status": status_desc,
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
@@ -685,7 +683,7 @@ async def main():
                 hostname=MQTT_HOST,
                 port=MQTT_PORT,
                 username=MQTT_USER,
-                password=MQTT_PASS
+                password=MQTT_PASS,
             ) as client:
 
                 print(f"Connected to MQTT {MQTT_HOST}:{MQTT_PORT}", flush=True)
