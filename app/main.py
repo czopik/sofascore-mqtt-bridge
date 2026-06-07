@@ -57,9 +57,13 @@ CONTEXT_SECONDS = float(LIVE_PREVIEW.get("context_seconds", 3))
 BLINK_COUNT = int(LIVE_PREVIEW.get("blink_count", 3))
 BLINK_INTERVAL = float(LIVE_PREVIEW.get("blink_interval", 0.35))
 BLANK_BETWEEN_SECONDS = float(LIVE_PREVIEW.get("blank_between_seconds", 0.25))
-MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 48))
+MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 96))
 SHOW_STATUS_ON_LED = LIVE_PREVIEW.get("show_status_on_led", False)
 NO_LIVE_TEXT = LIVE_PREVIEW.get("no_live_text", "BRAK MECZOW LIVE")
+DISPLAY_WIDTH_CHARS = int(LIVE_PREVIEW.get("display_width_chars", 16))
+STATIC_HOLD_SECONDS = float(LIVE_PREVIEW.get("static_hold_seconds", 3))
+SCROLL_CHARS_PER_SECOND = float(LIVE_PREVIEW.get("scroll_chars_per_second", 5))
+SCROLL_END_PAUSE_SECONDS = float(LIVE_PREVIEW.get("scroll_end_pause_seconds", 1))
 
 last_scores = {}
 last_all_live_scores = {}
@@ -109,11 +113,27 @@ def short_name(name):
     return SHORT_NAMES.get(name, clean.upper()[:3])
 
 
-def trim_display(text):
+def normalize_display(text):
     text = " ".join(str(text).split())
-    if len(text) <= MAX_DISPLAY_CHARS:
-        return text
-    return text[:MAX_DISPLAY_CHARS].rstrip()
+    if MAX_DISPLAY_CHARS > 0 and len(text) > MAX_DISPLAY_CHARS:
+        return text[:MAX_DISPLAY_CHARS].rstrip()
+    return text
+
+
+def trim_display(text):
+    return normalize_display(text)
+
+
+def calculate_display_seconds(text, minimum_seconds):
+    text_len = len(str(text))
+    width = max(1, DISPLAY_WIDTH_CHARS)
+
+    if text_len <= width:
+        return minimum_seconds
+
+    extra_chars = text_len - width
+    scroll_seconds = extra_chars / max(0.5, SCROLL_CHARS_PER_SECOND)
+    return max(minimum_seconds, STATIC_HOLD_SECONDS + scroll_seconds + SCROLL_END_PAUSE_SECONDS)
 
 
 def get_score(ev):
@@ -159,10 +179,10 @@ def format_event(ev, include_status=True):
 def format_context_event(ev):
     country, league = get_tournament_info(ev)
     if country and league:
-        return trim_display(f"{country} - {league}")
+        return normalize_display(f"{country} - {league}")
     if league:
-        return trim_display(league)
-    return trim_display(country or "MECZ LIVE")
+        return normalize_display(league)
+    return normalize_display(country or "MECZ LIVE")
 
 
 def format_score_event(ev):
@@ -172,7 +192,7 @@ def format_score_event(ev):
 
     if SHOW_STATUS_ON_LED:
         base = f"{base} ({get_status_text(ev)})"
-    return trim_display(base)
+    return normalize_display(base)
 
 
 def format_full_display_event(ev):
@@ -180,7 +200,7 @@ def format_full_display_event(ev):
     score = format_score_event(ev)
     prefix = " - ".join(part for part in [country, league] if part)
     if prefix:
-        return trim_display(f"{prefix}: {score}")
+        return normalize_display(f"{prefix}: {score}")
     return score
 
 
@@ -189,7 +209,7 @@ def format_display_event(ev):
 
 
 def enqueue_priority_message(text):
-    text = trim_display(text)
+    text = normalize_display(text)
     if not text:
         return
 
@@ -201,7 +221,7 @@ def enqueue_priority_message(text):
 def enqueue_priority_event(ev, prefix="GOAL"):
     context = format_context_event(ev)
     score = format_score_event(ev)
-    text = trim_display(f"{prefix} {score}")
+    text = normalize_display(f"{prefix} {score}")
     priority_messages.append((context, text))
     priority_signal.set()
     print(f"[DISPLAY PRIORITY QUEUED] {context} -> {text}", flush=True)
@@ -302,6 +322,8 @@ async def publish_live_preview(client, events):
         home = ev.get("homeTeam", {}).get("name", "HOME")
         away = ev.get("awayTeam", {}).get("name", "AWAY")
         country, league = get_tournament_info(ev)
+        context = format_context_event(ev)
+        score = format_score_event(ev)
         item = {
             "id": ev.get("id"),
             "country": country,
@@ -311,8 +333,10 @@ async def publish_live_preview(client, events):
             "score": get_score(ev),
             "status": get_status_text(ev),
             "line": format_event(ev, include_status=True),
-            "display_context": format_context_event(ev),
-            "display_score": format_score_event(ev),
+            "display_context": context,
+            "display_context_seconds": round(calculate_display_seconds(context, CONTEXT_SECONDS), 2),
+            "display_score": score,
+            "display_score_seconds": round(calculate_display_seconds(score, DISPLAY_SECONDS), 2),
             "display": format_full_display_event(ev),
         }
         items.append(item)
@@ -321,9 +345,10 @@ async def publish_live_preview(client, events):
         "type": "live_preview",
         "count": len(events),
         "shown": len(items),
-        "display_mode": "league_then_score_static",
-        "context_seconds": CONTEXT_SECONDS,
-        "display_seconds": DISPLAY_SECONDS,
+        "display_mode": "league_then_score_dynamic_wait",
+        "display_width_chars": DISPLAY_WIDTH_CHARS,
+        "static_hold_seconds": STATIC_HOLD_SECONDS,
+        "scroll_chars_per_second": SCROLL_CHARS_PER_SECOND,
         "matches": items,
     }
 
@@ -387,6 +412,12 @@ async def show_text_for_seconds(client, text, seconds, interruptible=True):
     return True
 
 
+async def show_text_dynamic(client, text, minimum_seconds, interruptible=True):
+    seconds = calculate_display_seconds(text, minimum_seconds)
+    print(f"[DISPLAY WAIT] {seconds:.2f}s for {repr(text)}", flush=True)
+    return await show_text_for_seconds(client, text, seconds, interruptible=interruptible)
+
+
 async def show_priority_text(client, message):
     if isinstance(message, tuple):
         context, text = message
@@ -396,8 +427,7 @@ async def show_priority_text(client, message):
     print(f"[DISPLAY PRIORITY] {context or ''} {text}", flush=True)
 
     if context:
-        await publish_led(client, context, retain=True)
-        await asyncio.sleep(CONTEXT_SECONDS)
+        await show_text_dynamic(client, context, CONTEXT_SECONDS, interruptible=False)
         await publish_led(client, " ", retain=True)
         await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
@@ -407,8 +437,7 @@ async def show_priority_text(client, message):
         await publish_led(client, " ", retain=True)
         await asyncio.sleep(BLINK_INTERVAL)
 
-    await publish_led(client, text, retain=True)
-    await asyncio.sleep(DISPLAY_SECONDS)
+    await show_text_dynamic(client, text, DISPLAY_SECONDS, interruptible=False)
     await publish_led(client, " ", retain=True)
     await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
@@ -432,7 +461,7 @@ async def display_live_rotation(client):
 
         if not events:
             if not last_no_live_sent:
-                await publish_led(client, trim_display(NO_LIVE_TEXT), retain=True)
+                await publish_led(client, normalize_display(NO_LIVE_TEXT), retain=True)
                 last_no_live_sent = True
             await asyncio.sleep(5)
             continue
@@ -445,10 +474,16 @@ async def display_live_rotation(client):
         ev = events[index]
         context_text = format_context_event(ev)
         score_text = format_score_event(ev)
-        print(f"[DISPLAY ROTATE] {index + 1}/{len(events)} {context_text} -> {score_text}", flush=True)
+        context_wait = calculate_display_seconds(context_text, CONTEXT_SECONDS)
+        score_wait = calculate_display_seconds(score_text, DISPLAY_SECONDS)
+        print(
+            f"[DISPLAY ROTATE] {index + 1}/{len(events)} "
+            f"{context_text} ({context_wait:.2f}s) -> {score_text} ({score_wait:.2f}s)",
+            flush=True,
+        )
         index += 1
 
-        context_completed = await show_text_for_seconds(
+        context_completed = await show_text_dynamic(
             client,
             context_text,
             CONTEXT_SECONDS,
@@ -461,7 +496,7 @@ async def display_live_rotation(client):
         await publish_led(client, " ", retain=True)
         await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
-        score_completed = await show_text_for_seconds(
+        score_completed = await show_text_dynamic(
             client,
             score_text,
             DISPLAY_SECONDS,
