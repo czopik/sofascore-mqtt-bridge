@@ -5,6 +5,7 @@ import yaml
 from asyncio_mqtt import Client, MqttError
 
 SOFASCORE_HOME = "https://www.sofascore.com/"
+LIVE_URL = "https://api.sofascore.com/api/v1/sport/football/events/live"
 
 PAGE_HEADERS = {
     "User-Agent": (
@@ -41,13 +42,20 @@ MQTT_USER = CONFIG["mqtt"]["username"]
 MQTT_PASS = CONFIG["mqtt"]["password"]
 
 LED_TOPIC = CONFIG.get("led", {}).get("topic", "all")
-TEAMS = CONFIG["teams"]
+TEAMS = CONFIG.get("teams", [])
 POLL_INTERVAL = CONFIG.get("poll_interval", 15)
+
+LIVE_PREVIEW = CONFIG.get("live_preview", {})
+LIVE_PREVIEW_ENABLED = LIVE_PREVIEW.get("enabled", True)
+LIVE_PREVIEW_TOPIC = LIVE_PREVIEW.get("topic", "sports/football/live")
+LIVE_PREVIEW_LIMIT = int(LIVE_PREVIEW.get("limit", 5))
+LIVE_PREVIEW_LED = LIVE_PREVIEW.get("led", True)
 
 last_scores = {}
 known_incidents = set()
 known_periods = set()
 initialized_events = set()
+last_live_preview_text = None
 sofascore_session_ready = False
 
 SHORT_NAMES = {
@@ -66,12 +74,35 @@ def short_name(name):
     return SHORT_NAMES.get(name, name.upper()[:3])
 
 
-async def publish_json(client, topic, payload):
+def get_score(ev):
+    hs = ev.get("homeScore", {}).get("current", 0)
+    aw = ev.get("awayScore", {}).get("current", 0)
+    return f"{hs}:{aw}"
+
+
+def format_event(ev):
+    home = ev.get("homeTeam", {}).get("name", "HOME")
+    away = ev.get("awayTeam", {}).get("name", "AWAY")
+    status = ev.get("status", {})
+    status_desc = status.get("description") or status.get("type", "")
+    minute = ev.get("time", {}).get("currentPeriodStartTimestamp")
+
+    if status_desc:
+        suffix = status_desc
+    elif minute:
+        suffix = str(minute)
+    else:
+        suffix = "live"
+
+    return f"{short_name(home)} {get_score(ev)} {short_name(away)} ({suffix})"
+
+
+async def publish_json(client, topic, payload, retain=False):
     await client.publish(
         topic,
         json.dumps(payload, ensure_ascii=False),
         qos=0,
-        retain=False
+        retain=retain
     )
     print("[MQTT JSON]", topic, payload, flush=True)
 
@@ -140,6 +171,57 @@ async def fetch_json(session, url, retry=True):
     except Exception as e:
         print("[FETCH ERROR]", e, flush=True)
         return {}
+
+
+async def fetch_live_events(session):
+    data = await fetch_json(session, LIVE_URL)
+    events = data.get("events", [])
+    print(f"[DEBUG] live events: {len(events)}", flush=True)
+    return events
+
+
+async def publish_live_preview(client, events):
+    global last_live_preview_text
+
+    if not LIVE_PREVIEW_ENABLED:
+        return
+
+    preview_events = events[:LIVE_PREVIEW_LIMIT]
+    items = []
+
+    for ev in preview_events:
+        home = ev.get("homeTeam", {}).get("name", "HOME")
+        away = ev.get("awayTeam", {}).get("name", "AWAY")
+        status = ev.get("status", {})
+        item = {
+            "id": ev.get("id"),
+            "home": home,
+            "away": away,
+            "score": get_score(ev),
+            "status": status.get("description") or status.get("type", ""),
+            "line": format_event(ev),
+        }
+        items.append(item)
+
+    payload = {
+        "type": "live_preview",
+        "count": len(events),
+        "shown": len(items),
+        "matches": items,
+    }
+
+    await publish_json(client, LIVE_PREVIEW_TOPIC, payload, retain=True)
+
+    if not events:
+        print("[LIVE PREVIEW] no live matches or API returned no data", flush=True)
+        return
+
+    text = " | ".join(item["line"] for item in items)
+    print(f"[LIVE PREVIEW] {text}", flush=True)
+
+    if LIVE_PREVIEW_LED and text != last_live_preview_text:
+        last_live_preview_text = text
+        await publish_led(client, text[:250], retain=True)
 
 
 async def preload_incidents(session, event_id):
@@ -217,13 +299,7 @@ async def handle_incidents(session, client, team, event_id, score):
                 await publish_led(client, led)
 
 
-async def process_team(session, client, team):
-    live_url = "https://api.sofascore.com/api/v1/sport/football/events/live"
-    data = await fetch_json(session, live_url)
-    events = data.get("events", [])
-
-    print(f"[DEBUG] live events: {len(events)}", flush=True)
-
+async def process_team(session, client, team, events):
     found = False
 
     for ev in events:
@@ -246,10 +322,7 @@ async def process_team(session, client, team):
 
         home = home_team.get("name", "HOME")
         away = away_team.get("name", "AWAY")
-
-        hs = ev.get("homeScore", {}).get("current", 0)
-        aw = ev.get("awayScore", {}).get("current", 0)
-        score = f"{hs}:{aw}"
+        score = get_score(ev)
 
         status = ev.get("status", {})
         status_type = status.get("type", "")
@@ -330,8 +403,11 @@ async def main():
                 connector = aiohttp.TCPConnector(ssl=False)
                 async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                     while True:
+                        events = await fetch_live_events(session)
+                        await publish_live_preview(client, events)
+
                         for team in TEAMS:
-                            await process_team(session, client, team)
+                            await process_team(session, client, team, events)
 
                         await asyncio.sleep(POLL_INTERVAL)
 
