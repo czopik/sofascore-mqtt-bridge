@@ -1,4 +1,4 @@
-aiohttp
+curl_cffi
 asyncio-mqtt
 PyYAML
 paho-mqtt<2.0
