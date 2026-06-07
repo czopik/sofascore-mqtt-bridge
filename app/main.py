@@ -68,9 +68,10 @@ DISPLAY_WIDTH_CHARS = int(LIVE_PREVIEW.get("display_width_chars", 16))
 STATIC_HOLD_SECONDS = float(LIVE_PREVIEW.get("static_hold_seconds", 3))
 SCROLL_CHARS_PER_SECOND = float(LIVE_PREVIEW.get("scroll_chars_per_second", 5))
 SCROLL_END_PAUSE_SECONDS = float(LIVE_PREVIEW.get("scroll_end_pause_seconds", 1))
-# For LED we now default to 3-letter team abbreviations, e.g. LEC 1:0 LEG.
 USE_FULL_TEAM_NAMES = LIVE_PREVIEW.get("use_full_team_names", False)
 LEAGUE_MAX_CHARS = int(LIVE_PREVIEW.get("league_max_chars", DISPLAY_WIDTH_CHARS))
+GOAL_TEXT_SECONDS = float(LIVE_PREVIEW.get("goal_text_seconds", 0.8))
+GOAL_TEAM_SECONDS = float(LIVE_PREVIEW.get("goal_team_seconds", 2.0))
 
 last_scores = {}
 last_all_live_scores = {}
@@ -147,6 +148,14 @@ def normalize_display(text):
     text = " ".join(str(text or "").split())
     if MAX_DISPLAY_CHARS > 0 and len(text) > MAX_DISPLAY_CHARS:
         return text[:MAX_DISPLAY_CHARS].rstrip()
+    return text
+
+
+def fit_to_display(text):
+    text = normalize_display(text)
+    width = max(1, DISPLAY_WIDTH_CHARS)
+    if len(text) > width:
+        return text[:width].rstrip()
     return text
 
 
@@ -237,6 +246,27 @@ def get_score(ev):
     return f"{hs}:{aw}"
 
 
+def parse_score(score):
+    try:
+        left, right = str(score).split(":", 1)
+        return int(left), int(right)
+    except Exception:
+        return None, None
+
+
+def guess_scoring_team(ev, old_score):
+    old_home, old_away = parse_score(old_score)
+    new_home, new_away = parse_score(get_score(ev))
+    home = ev.get("homeTeam", {}).get("name", "")
+    away = ev.get("awayTeam", {}).get("name", "")
+
+    if old_home is not None and new_home is not None and new_home > old_home:
+        return home
+    if old_away is not None and new_away is not None and new_away > old_away:
+        return away
+    return ""
+
+
 def get_status_text(ev):
     status = ev.get("status", {}) or {}
     status_desc = status.get("description") or status.get("type", "")
@@ -296,15 +326,27 @@ def enqueue_priority_message(text):
     if not text:
         return
 
-    priority_messages.append((None, None, text))
+    priority_messages.append({"type": "text", "text": text})
     priority_signal.set()
     print(f"[DISPLAY PRIORITY QUEUED] {text}", flush=True)
 
 
-def enqueue_priority_event(ev, prefix="GOAL"):
+def enqueue_priority_event(ev, prefix="GOAL", goal_team=None):
     country, league, score = get_display_parts(ev)
+
+    if prefix == "GOAL":
+        team_text = fit_to_display(goal_team or guess_scoring_team(ev, last_all_live_scores.get(str(ev.get("id")), "")) or "GOAL")
+        priority_messages.append({
+            "type": "goal",
+            "team": team_text,
+            "score": score,
+        })
+        priority_signal.set()
+        print(f"[DISPLAY PRIORITY QUEUED] GOAL -> {team_text} -> {score}", flush=True)
+        return
+
     priority_score = normalize_display(f"{prefix} {score}")
-    priority_messages.append((country, league, priority_score))
+    priority_messages.append({"type": "sequence", "country": country, "league": league, "text": priority_score})
     priority_signal.set()
     print(f"[DISPLAY PRIORITY QUEUED] {country} -> {league} -> {priority_score}", flush=True)
 
@@ -439,6 +481,7 @@ async def publish_live_preview(client, events):
         "display_width_chars": DISPLAY_WIDTH_CHARS,
         "league_max_chars": LEAGUE_MAX_CHARS,
         "team_mode": "short_3_letters",
+        "goal_priority_mode": "GOAL, team, GOAL x3, score",
         "matches": items,
     }
 
@@ -466,14 +509,13 @@ async def detect_live_score_changes(events):
         seen_keys.add(key)
         score = get_score(ev)
         old_score = last_all_live_scores.get(key)
-        last_all_live_scores[key] = score
 
-        if not live_scores_initialized:
-            continue
-
-        if old_score is not None and old_score != score:
-            enqueue_priority_event(ev, prefix="GOAL")
+        if live_scores_initialized and old_score is not None and old_score != score:
+            goal_team = guess_scoring_team(ev, old_score)
+            enqueue_priority_event(ev, prefix="GOAL", goal_team=goal_team)
             print(f"[SCORE CHANGE] {key}: {old_score} -> {score}", flush=True)
+
+        last_all_live_scores[key] = score
 
     for key in list(last_all_live_scores.keys()):
         if key not in seen_keys:
@@ -527,8 +569,43 @@ async def show_match_sequence(client, country, league, score, interruptible=True
     return True
 
 
+async def show_goal_priority(client, message):
+    team = fit_to_display(message.get("team") or "GOAL")
+    score = fit_to_display(message.get("score") or "")
+
+    print(f"[DISPLAY PRIORITY GOAL] GOAL -> {team} -> GOAL x{BLINK_COUNT} -> {score}", flush=True)
+
+    await show_text_for_seconds(client, "GOAL", GOAL_TEXT_SECONDS, interruptible=False)
+    await clear_led(client)
+
+    if team and team != "GOAL":
+        await show_text_for_seconds(client, team, GOAL_TEAM_SECONDS, interruptible=False)
+        await clear_led(client)
+
+    for _ in range(BLINK_COUNT):
+        await show_text_for_seconds(client, "GOAL", GOAL_TEXT_SECONDS, interruptible=False)
+        await clear_led(client)
+
+    if score:
+        await show_text_for_seconds(client, score, DISPLAY_SECONDS, interruptible=False)
+        await clear_led(client)
+
+
 async def show_priority_text(client, message):
-    if isinstance(message, tuple):
+    if isinstance(message, dict):
+        msg_type = message.get("type")
+        if msg_type == "goal":
+            await show_goal_priority(client, message)
+            return
+        if msg_type == "sequence":
+            country = message.get("country")
+            league = message.get("league")
+            text = message.get("text")
+        else:
+            country = None
+            league = None
+            text = message.get("text")
+    elif isinstance(message, tuple):
         country, league, text = message
     else:
         country, league, text = None, None, message
@@ -544,12 +621,12 @@ async def show_priority_text(client, message):
         await clear_led(client)
 
     for _ in range(BLINK_COUNT):
-        await publish_led(client, text, retain=True)
+        await publish_led(client, fit_to_display(text), retain=True)
         await asyncio.sleep(BLINK_INTERVAL)
         await publish_led(client, " ", retain=True)
         await asyncio.sleep(BLINK_INTERVAL)
 
-    await show_text_dynamic(client, text, DISPLAY_SECONDS, interruptible=False)
+    await show_text_for_seconds(client, fit_to_display(text), DISPLAY_SECONDS, interruptible=False)
     await clear_led(client)
 
 
@@ -655,7 +732,11 @@ async def handle_incidents(session, client, team, event_id, score):
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/goal", payload)
-            enqueue_priority_message(f"GOAL {short_name(goal_team)} {score}")
+            matching_event = next((ev for ev in current_live_events if str(ev.get("id")) == str(event_id)), None)
+            if matching_event:
+                enqueue_priority_event(matching_event, prefix="GOAL", goal_team=goal_team)
+            else:
+                enqueue_priority_message(f"GOAL {short_name(goal_team)} {score}")
 
         elif inc_type == "card":
             color = inc.get("color", "yellow")
@@ -727,6 +808,7 @@ async def process_team(session, client, team, events):
         old_score = last_scores.get(event_key)
 
         if old_score != score:
+            goal_team = guess_scoring_team(ev, old_score)
             last_scores[event_key] = score
 
             payload = {
@@ -738,7 +820,7 @@ async def process_team(session, client, team, events):
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
-            enqueue_priority_event(ev, prefix="GOAL")
+            enqueue_priority_event(ev, prefix="GOAL", goal_team=goal_team)
 
         period_key = f"{event_id}:{status_type}:{status_desc}"
 
