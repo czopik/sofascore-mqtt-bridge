@@ -7,9 +7,7 @@ mqtt:
 led:
   topic: "all"
 
-teams:
-  - name: "Lech Poznań"
-    mqtt_prefix: "sports/football/lech"
+teams: []
 
 live_preview:
   enabled: true
