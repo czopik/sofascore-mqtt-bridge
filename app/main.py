@@ -4,7 +4,18 @@ import aiohttp
 import yaml
 from asyncio_mqtt import Client, MqttError
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://www.sofascore.com/",
+    "Origin": "https://www.sofascore.com",
+    "Connection": "keep-alive",
+}
 
 with open("config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
@@ -67,7 +78,9 @@ async def fetch_json(session, url):
             timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             if resp.status != 200:
+                body = await resp.text()
                 print(f"[HTTP ERROR] {resp.status} {url}", flush=True)
+                print(f"[HTTP BODY] {body[:500]}", flush=True)
                 return {}
 
             return await resp.json()
