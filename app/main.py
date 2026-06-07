@@ -37,7 +37,7 @@ API_HEADERS = {
     "Sec-Fetch-Site": "same-site",
 }
 
-with open("config.yaml", "r") as f:
+with open("config.yaml", "r", encoding="utf-8") as f:
     CONFIG = yaml.safe_load(f)
 
 MQTT_HOST = CONFIG["mqtt"]["host"]
@@ -64,7 +64,7 @@ BLINK_INTERVAL = float(LIVE_PREVIEW.get("blink_interval", 0.35))
 BLANK_BETWEEN_SECONDS = float(LIVE_PREVIEW.get("blank_between_seconds", 0.25))
 MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 120))
 SHOW_STATUS_ON_LED = LIVE_PREVIEW.get("show_status_on_led", False)
-NO_LIVE_TEXT = LIVE_PREVIEW.get("no_live_text", "BRAK MECZOW LIVE")
+NO_LIVE_TEXT = LIVE_PREVIEW.get("no_live_text", "brak meczow live")
 DISPLAY_WIDTH_CHARS = int(LIVE_PREVIEW.get("display_width_chars", 16))
 STATIC_HOLD_SECONDS = float(LIVE_PREVIEW.get("static_hold_seconds", 3))
 SCROLL_CHARS_PER_SECOND = float(LIVE_PREVIEW.get("scroll_chars_per_second", 5))
@@ -73,6 +73,7 @@ USE_FULL_TEAM_NAMES = LIVE_PREVIEW.get("use_full_team_names", False)
 LEAGUE_MAX_CHARS = int(LIVE_PREVIEW.get("league_max_chars", DISPLAY_WIDTH_CHARS))
 GOAL_TEXT_SECONDS = float(LIVE_PREVIEW.get("goal_text_seconds", 0.8))
 GOAL_TEAM_SECONDS = float(LIVE_PREVIEW.get("goal_team_seconds", 2.0))
+DISPLAY_CASE = str(LIVE_PREVIEW.get("display_case", "lower")).lower()
 
 last_scores = {}
 last_all_live_scores = {}
@@ -86,80 +87,80 @@ sofascore_session_ready = False
 live_scores_initialized = False
 
 SHORT_NAMES = {
-    "Juventus": "JUV",
-    "Torino": "TOR",
-    "Lech Poznań": "LEC",
-    "Lech Poznan": "LEC",
-    "Legia Warszawa": "LEG",
-    "AC Milan": "MIL",
-    "Cagliari": "CAG",
-    "Ecuador": "ECU",
-    "Guatemala": "GUA",
+    "Juventus": "juv",
+    "Torino": "tor",
+    "Lech Poznań": "lec",
+    "Lech Poznan": "lec",
+    "Legia Warszawa": "leg",
+    "AC Milan": "mil",
+    "Cagliari": "cag",
+    "Ecuador": "ecu",
+    "Guatemala": "gua",
 }
 
 COUNTRY_NAMES_PL = {
-    "Argentina": "ARGENTYNA",
-    "Austria": "AUSTRIA",
-    "Belgium": "BELGIA",
-    "Bolivia": "BOLIWIA",
-    "Brazil": "BRAZYLIA",
-    "Chile": "CHILE",
-    "Colombia": "KOLUMBIA",
-    "Croatia": "CHORWACJA",
-    "Czech Republic": "CZECHY",
-    "Denmark": "DANIA",
-    "Ecuador": "EKWADOR",
-    "England": "ANGLIA",
-    "France": "FRANCJA",
-    "Germany": "NIEMCY",
-    "Greece": "GRECJA",
-    "Guatemala": "GWATEMALA",
-    "Italy": "WLOCHY",
-    "Mexico": "MEKSYK",
-    "Netherlands": "HOLANDIA",
-    "Norway": "NORWEGIA",
-    "Paraguay": "PARAGWAJ",
-    "Peru": "PERU",
-    "Poland": "POLSKA",
-    "Portugal": "PORTUGALIA",
-    "Scotland": "SZKOCJA",
-    "Spain": "HISZPANIA",
-    "Sweden": "SZWECJA",
-    "Switzerland": "SZWAJCARIA",
-    "Turkey": "TURCJA",
-    "Ukraine": "UKRAINA",
-    "USA": "USA",
-    "World": "SWIAT",
+    "Argentina": "argentyna",
+    "Austria": "austria",
+    "Belgium": "belgia",
+    "Bolivia": "boliwia",
+    "Brazil": "brazylia",
+    "Chile": "chile",
+    "Colombia": "kolumbia",
+    "Croatia": "chorwacja",
+    "Czech Republic": "czechy",
+    "Denmark": "dania",
+    "Ecuador": "ekwador",
+    "England": "anglia",
+    "France": "francja",
+    "Germany": "niemcy",
+    "Greece": "grecja",
+    "Guatemala": "gwatemala",
+    "Italy": "wlochy",
+    "Mexico": "meksyk",
+    "Netherlands": "holandia",
+    "Norway": "norwegia",
+    "Paraguay": "paragwaj",
+    "Peru": "peru",
+    "Poland": "polska",
+    "Portugal": "portugalia",
+    "Scotland": "szkocja",
+    "Spain": "hiszpania",
+    "Sweden": "szwecja",
+    "Switzerland": "szwajcaria",
+    "Turkey": "turcja",
+    "Ukraine": "ukraina",
+    "USA": "usa",
+    "World": "swiat",
 }
 
 LEAGUE_SHORT_NAMES = {
-    "Int. Friendly Games": "TOWARZYSKI",
-    "International Friendly Games": "TOWARZYSKI",
-    "UEFA Nations League": "NATIONS",
-    "World Championship": "MUNDIAL",
-    "World Cup": "MUNDIAL",
-    "European Championship": "EURO",
-    "Copa América": "COPA",
-    "Copa America": "COPA",
-    "Ekstraklasa": "EKSTRAKLASA",
-    "Premier League": "PREMIER",
-    "LaLiga": "LALIGA",
-    "LaLiga EA Sports": "LALIGA",
-    "Serie A": "SERIE A",
-    "Bundesliga": "BUNDESLIGA",
-    "Ligue 1": "LIGUE 1",
-    "Eredivisie": "EREDIVISIE",
-    "Primeira Liga": "LIGA POR",
-    "Süper Lig": "SUPER LIG",
-    "Super Lig": "SUPER LIG",
-    "Pro League": "PRO LEAGUE",
-    "Liga Profesional de Fútbol": "LIGA ARG",
-    "Liga Profesional": "LIGA ARG",
-    "Brasileirão Série A": "SERIE A BR",
-    "Brasileirao Serie A": "SERIE A BR",
-    "Serie A, Primera Etapa": "SERIE A ECU",
-    "Liga MX, Apertura": "LIGA MX",
-    "Liga MX, Clausura": "LIGA MX",
+    "Int. Friendly Games": "towarzyski",
+    "International Friendly Games": "towarzyski",
+    "UEFA Nations League": "nations",
+    "World Championship": "mundial",
+    "World Cup": "mundial",
+    "European Championship": "euro",
+    "Copa América": "copa",
+    "Copa America": "copa",
+    "Ekstraklasa": "ekstraklasa",
+    "Premier League": "premier",
+    "LaLiga": "laliga",
+    "LaLiga EA Sports": "laliga",
+    "Serie A": "serie a",
+    "Bundesliga": "bundesliga",
+    "Ligue 1": "ligue 1",
+    "Eredivisie": "eredivisie",
+    "Primeira Liga": "liga por",
+    "Süper Lig": "super lig",
+    "Super Lig": "super lig",
+    "Pro League": "pro league",
+    "Liga Profesional de Fútbol": "liga arg",
+    "Liga Profesional": "liga arg",
+    "Brasileirão Série A": "serie a br",
+    "Brasileirao Serie A": "serie a br",
+    "Serie A, Primera Etapa": "serie a ecu",
+    "Liga MX, Apertura": "liga mx",
+    "Liga MX, Clausura": "liga mx",
 }
 
 TEAM_PREFIX_STOPWORDS = {
@@ -224,8 +225,20 @@ def norm_key(text):
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
+def apply_display_case(text):
+    text = str(text or "")
+    if DISPLAY_CASE == "upper":
+        return text.upper()
+    if DISPLAY_CASE == "title":
+        return text.title()
+    if DISPLAY_CASE == "keep":
+        return text
+    return text.lower()
+
+
 def normalize_display(text):
     text = " ".join(str(text or "").split())
+    text = apply_display_case(text)
     if MAX_DISPLAY_CHARS > 0 and len(text) > MAX_DISPLAY_CHARS:
         return text[:MAX_DISPLAY_CHARS].rstrip()
     return text
@@ -250,7 +263,7 @@ def short_name(name):
         return "???"
 
     if name in SHORT_NAMES:
-        return SHORT_NAMES[name]
+        return normalize_display(SHORT_NAMES[name])
 
     cleaned = str(name)
     cleaned = re.sub(r"\bClub\s+Atl[eé]tico\b", "", cleaned, flags=re.IGNORECASE)
@@ -269,24 +282,24 @@ def short_name(name):
 
     token = tokens[0]
     if len(token) >= 3:
-        return token[:3]
+        return normalize_display(token[:3])
 
     if len(tokens) > 1:
         joined = "".join(tokens)
-        return joined[:3].ljust(3, "?")
+        return normalize_display(joined[:3].ljust(3, "?"))
 
-    return token[:3].ljust(3, "?")
+    return normalize_display(token[:3].ljust(3, "?"))
 
 
 def compact_league_name(name):
-    name = normalize_display(name or "Liga")
+    name = " ".join(str(name or "Liga").split())
 
     if name in LEAGUE_SHORT_NAMES:
-        return LEAGUE_SHORT_NAMES[name]
+        return normalize_display(LEAGUE_SHORT_NAMES[name])
 
     limit = max(6, LEAGUE_MAX_CHARS)
     if len(name) <= limit:
-        return name
+        return normalize_display(name)
 
     ascii_name = strip_accents(name)
     words = re.split(r"\s+", ascii_name.replace(".", ""))
@@ -296,16 +309,16 @@ def compact_league_name(name):
         token = clean_token(word)
         if not token or token in LEAGUE_WORDS_TO_REMOVE:
             continue
-        useful.append(word.upper()[:8])
+        useful.append(word[:8])
 
     compact = " ".join(useful[:2]).strip()
     if not compact:
-        compact = ascii_name.upper()
+        compact = ascii_name
 
     if len(compact) > limit:
         compact = compact[:limit].rstrip()
 
-    return compact or name[:limit]
+    return normalize_display(compact or name[:limit])
 
 
 def get_raw_tournament_info(ev):
@@ -322,9 +335,9 @@ def get_raw_tournament_info(ev):
 
 def get_tournament_info(ev):
     country_raw, league_raw, _ = get_raw_tournament_info(ev)
-    country = COUNTRY_NAMES_PL.get(country_raw, country_raw.upper() if country_raw else "")
+    country = COUNTRY_NAMES_PL.get(country_raw, country_raw if country_raw else "")
     league = compact_league_name(league_raw)
-    return normalize_display(country or "INNE"), normalize_display(league or "Liga")
+    return normalize_display(country or "inne"), normalize_display(league or "liga")
 
 
 def is_international_event(ev):
@@ -407,19 +420,19 @@ def get_status_text(ev):
     status = ev.get("status", {}) or {}
     status_desc = status.get("description") or status.get("type", "")
     if status_desc:
-        return status_desc
+        return normalize_display(status_desc)
     return "live"
 
 
 def get_team_name(name):
     if USE_FULL_TEAM_NAMES:
-        return name or "???"
+        return normalize_display(name or "???")
     return short_name(name)
 
 
 def format_score_event(ev):
-    home = ev.get("homeTeam", {}).get("name", "HOME")
-    away = ev.get("awayTeam", {}).get("name", "AWAY")
+    home = ev.get("homeTeam", {}).get("name", "home")
+    away = ev.get("awayTeam", {}).get("name", "away")
     base = f"{get_team_name(home)} {get_score(ev)} {get_team_name(away)}"
 
     if SHOW_STATUS_ON_LED:
@@ -430,7 +443,7 @@ def format_score_event(ev):
 def format_event(ev, include_status=True):
     base = format_score_event(ev)
     if include_status and not SHOW_STATUS_ON_LED:
-        return f"{base} ({get_status_text(ev)})"
+        return normalize_display(f"{base} ({get_status_text(ev)})")
     return base
 
 
@@ -455,14 +468,15 @@ def enqueue_priority_message(text):
     print(f"[DISPLAY PRIORITY QUEUED] {text}", flush=True)
 
 
-def enqueue_priority_event(ev, prefix="GOAL", goal_team=None):
+def enqueue_priority_event(ev, prefix="goal", goal_team=None):
     country, league, score = get_display_parts(ev)
+    prefix = normalize_display(prefix)
 
-    if prefix == "GOAL":
-        team_text = fit_to_display(goal_team or guess_scoring_team(ev, last_all_live_scores.get(str(ev.get("id")), "")) or "GOAL")
+    if prefix == "goal":
+        team_text = fit_to_display(goal_team or guess_scoring_team(ev, last_all_live_scores.get(str(ev.get("id")), "")) or "goal")
         priority_messages.append({"type": "goal", "team": team_text, "score": score})
         priority_signal.set()
-        print(f"[DISPLAY PRIORITY QUEUED] GOAL -> {team_text} -> {score}", flush=True)
+        print(f"[DISPLAY PRIORITY QUEUED] goal -> {team_text} -> {score}", flush=True)
         return
 
     priority_score = normalize_display(f"{prefix} {score}")
@@ -477,6 +491,7 @@ async def publish_json(client, topic, payload, retain=False):
 
 
 async def publish_led(client, text, retain=False):
+    text = normalize_display(text)
     await client.publish(LED_TOPIC, text, qos=1, retain=retain)
     print("[MQTT LED]", LED_TOPIC, repr(text), flush=True)
 
@@ -546,8 +561,8 @@ async def publish_live_preview(client, raw_events, display_events):
     items = []
 
     for ev in preview_events:
-        home = ev.get("homeTeam", {}).get("name", "HOME")
-        away = ev.get("awayTeam", {}).get("name", "AWAY")
+        home = ev.get("homeTeam", {}).get("name", "home")
+        away = ev.get("awayTeam", {}).get("name", "away")
         country, league, score_text = get_display_parts(ev)
         item = {
             "id": ev.get("id"),
@@ -577,11 +592,12 @@ async def publish_live_preview(client, raw_events, display_events):
         "filtered_count": len(display_events),
         "shown": len(items),
         "filter": "internationals_and_top_leagues_only",
-        "display_mode": "country_then_short_league_then_short_score",
+        "display_mode": "country_then_short_league_then_lowercase_short_score",
+        "display_case": DISPLAY_CASE,
         "display_width_chars": DISPLAY_WIDTH_CHARS,
         "league_max_chars": LEAGUE_MAX_CHARS,
-        "team_mode": "short_3_letters",
-        "goal_priority_mode": "GOAL, team, GOAL x3, score",
+        "team_mode": "short_3_letters_lowercase",
+        "goal_priority_mode": "goal, team, goal x3, score",
         "matches": items,
     }
 
@@ -612,7 +628,7 @@ async def detect_live_score_changes(events):
 
         if live_scores_initialized and old_score is not None and old_score != score:
             goal_team = guess_scoring_team(ev, old_score)
-            enqueue_priority_event(ev, prefix="GOAL", goal_team=goal_team)
+            enqueue_priority_event(ev, prefix="goal", goal_team=goal_team)
             print(f"[SCORE CHANGE] {key}: {old_score} -> {score}", flush=True)
 
         last_all_live_scores[key] = score
@@ -666,20 +682,20 @@ async def show_match_sequence(client, country, league, score, interruptible=True
 
 
 async def show_goal_priority(client, message):
-    team = fit_to_display(message.get("team") or "GOAL")
+    team = fit_to_display(message.get("team") or "goal")
     score = fit_to_display(message.get("score") or "")
 
-    print(f"[DISPLAY PRIORITY GOAL] GOAL -> {team} -> GOAL x{BLINK_COUNT} -> {score}", flush=True)
+    print(f"[DISPLAY PRIORITY GOAL] goal -> {team} -> goal x{BLINK_COUNT} -> {score}", flush=True)
 
-    await show_text_for_seconds(client, "GOAL", GOAL_TEXT_SECONDS, interruptible=False)
+    await show_text_for_seconds(client, "goal", GOAL_TEXT_SECONDS, interruptible=False)
     await clear_led(client)
 
-    if team and team != "GOAL":
+    if team and team != "goal":
         await show_text_for_seconds(client, team, GOAL_TEAM_SECONDS, interruptible=False)
         await clear_led(client)
 
     for _ in range(BLINK_COUNT):
-        await show_text_for_seconds(client, "GOAL", GOAL_TEXT_SECONDS, interruptible=False)
+        await show_text_for_seconds(client, "goal", GOAL_TEXT_SECONDS, interruptible=False)
         await clear_led(client)
 
     if score:
@@ -716,13 +732,14 @@ async def show_priority_text(client, message):
         await show_text_dynamic(client, league, LEAGUE_SECONDS, interruptible=False)
         await clear_led(client)
 
+    text = fit_to_display(text)
     for _ in range(BLINK_COUNT):
-        await publish_led(client, fit_to_display(text), retain=True)
+        await publish_led(client, text, retain=True)
         await asyncio.sleep(BLINK_INTERVAL)
         await publish_led(client, " ", retain=True)
         await asyncio.sleep(BLINK_INTERVAL)
 
-    await show_text_for_seconds(client, fit_to_display(text), DISPLAY_SECONDS, interruptible=False)
+    await show_text_for_seconds(client, text, DISPLAY_SECONDS, interruptible=False)
     await clear_led(client)
 
 
@@ -817,9 +834,9 @@ async def handle_incidents(session, client, team, event_id, score):
             await publish_json(client, f"{team['mqtt_prefix']}/goal", payload)
             matching_event = next((ev for ev in current_live_events if str(ev.get("id")) == str(event_id)), None)
             if matching_event:
-                enqueue_priority_event(matching_event, prefix="GOAL", goal_team=goal_team)
+                enqueue_priority_event(matching_event, prefix="goal", goal_team=goal_team)
             else:
-                enqueue_priority_message(f"GOAL {short_name(goal_team)} {score}")
+                enqueue_priority_message(f"goal {short_name(goal_team)} {score}")
 
         elif inc_type == "card":
             color = inc.get("color", "yellow")
@@ -831,7 +848,7 @@ async def handle_incidents(session, client, team, event_id, score):
             await publish_json(client, f"{team['mqtt_prefix']}/card", payload)
 
             if color == "red":
-                enqueue_priority_message(f"RED {short_name(card_team)} {minute}'")
+                enqueue_priority_message(f"red {short_name(card_team)} {minute}'")
 
 
 async def process_team(session, client, team, events):
@@ -853,8 +870,8 @@ async def process_team(session, client, team, events):
             continue
 
         event_key = str(event_id)
-        home = home_team.get("name", "HOME")
-        away = away_team.get("name", "AWAY")
+        home = home_team.get("name", "home")
+        away = away_team.get("name", "away")
         score = get_score(ev)
         status = ev.get("status", {})
         status_type = status.get("type", "")
@@ -876,7 +893,7 @@ async def process_team(session, client, team, events):
             last_scores[event_key] = score
             payload = {"type": "score", "home": home, "away": away, "score": score, "status": status_desc}
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
-            enqueue_priority_event(ev, prefix="GOAL", goal_team=goal_team)
+            enqueue_priority_event(ev, prefix="goal", goal_team=goal_team)
 
         period_key = f"{event_id}:{status_type}:{status_desc}"
 
@@ -884,9 +901,9 @@ async def process_team(session, client, team, events):
             known_periods.add(period_key)
 
             if "Halftime" in status_desc:
-                enqueue_priority_event(ev, prefix="HT")
+                enqueue_priority_event(ev, prefix="ht")
             elif "Ended" in status_desc or status_type == "finished":
-                enqueue_priority_event(ev, prefix="FT")
+                enqueue_priority_event(ev, prefix="ft")
 
         await handle_incidents(session, client, team, event_id, score)
 
