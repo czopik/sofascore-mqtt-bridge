@@ -53,10 +53,11 @@ LIVE_PREVIEW_TOPIC = LIVE_PREVIEW.get("topic", "sports/football/live")
 LIVE_PREVIEW_LIMIT = int(LIVE_PREVIEW.get("limit", 5))
 LIVE_PREVIEW_LED = LIVE_PREVIEW.get("led", True)
 DISPLAY_SECONDS = float(LIVE_PREVIEW.get("display_seconds", 5))
+CONTEXT_SECONDS = float(LIVE_PREVIEW.get("context_seconds", 3))
 BLINK_COUNT = int(LIVE_PREVIEW.get("blink_count", 3))
 BLINK_INTERVAL = float(LIVE_PREVIEW.get("blink_interval", 0.35))
 BLANK_BETWEEN_SECONDS = float(LIVE_PREVIEW.get("blank_between_seconds", 0.25))
-MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 32))
+MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 48))
 SHOW_STATUS_ON_LED = LIVE_PREVIEW.get("show_status_on_led", False)
 NO_LIVE_TEXT = LIVE_PREVIEW.get("no_live_text", "BRAK MECZOW LIVE")
 
@@ -80,6 +81,23 @@ SHORT_NAMES = {
     "Cagliari": "CAG",
     "Ecuador": "ECU",
     "Guatemala": "GUA",
+}
+
+COUNTRY_NAMES_PL = {
+    "Argentina": "ARGENTYNA",
+    "Bolivia": "BOLIWIA",
+    "Brazil": "BRAZYLIA",
+    "Chile": "CHILE",
+    "Colombia": "KOLUMBIA",
+    "Ecuador": "EKWADOR",
+    "Guatemala": "GWATEMALA",
+    "Paraguay": "PARAGWAJ",
+    "Peru": "PERU",
+    "Poland": "POLSKA",
+    "Spain": "HISZPANIA",
+    "Switzerland": "SZWAJCARIA",
+    "USA": "USA",
+    "World": "SWIAT",
 }
 
 
@@ -117,6 +135,17 @@ def get_status_text(ev):
     return "live"
 
 
+def get_tournament_info(ev):
+    tournament = ev.get("tournament", {}) or {}
+    category = tournament.get("category", {}) or {}
+
+    league = tournament.get("name") or tournament.get("uniqueTournament", {}).get("name") or "Liga"
+    country = category.get("name") or category.get("country", {}).get("name") or ""
+    country = COUNTRY_NAMES_PL.get(country, country.upper() if country else "")
+
+    return country, league
+
+
 def format_event(ev, include_status=True):
     home = ev.get("homeTeam", {}).get("name", "HOME")
     away = ev.get("awayTeam", {}).get("name", "AWAY")
@@ -127,8 +156,36 @@ def format_event(ev, include_status=True):
     return base
 
 
+def format_context_event(ev):
+    country, league = get_tournament_info(ev)
+    if country and league:
+        return trim_display(f"{country} - {league}")
+    if league:
+        return trim_display(league)
+    return trim_display(country or "MECZ LIVE")
+
+
+def format_score_event(ev):
+    home = ev.get("homeTeam", {}).get("name", "HOME")
+    away = ev.get("awayTeam", {}).get("name", "AWAY")
+    base = f"{short_name(home)} {get_score(ev)} {short_name(away)}"
+
+    if SHOW_STATUS_ON_LED:
+        base = f"{base} ({get_status_text(ev)})"
+    return trim_display(base)
+
+
+def format_full_display_event(ev):
+    country, league = get_tournament_info(ev)
+    score = format_score_event(ev)
+    prefix = " - ".join(part for part in [country, league] if part)
+    if prefix:
+        return trim_display(f"{prefix}: {score}")
+    return score
+
+
 def format_display_event(ev):
-    return trim_display(format_event(ev, include_status=SHOW_STATUS_ON_LED))
+    return format_score_event(ev)
 
 
 def enqueue_priority_message(text):
@@ -136,9 +193,18 @@ def enqueue_priority_message(text):
     if not text:
         return
 
-    priority_messages.append(text)
+    priority_messages.append((None, text))
     priority_signal.set()
     print(f"[DISPLAY PRIORITY QUEUED] {text}", flush=True)
+
+
+def enqueue_priority_event(ev, prefix="GOAL"):
+    context = format_context_event(ev)
+    score = format_score_event(ev)
+    text = trim_display(f"{prefix} {score}")
+    priority_messages.append((context, text))
+    priority_signal.set()
+    print(f"[DISPLAY PRIORITY QUEUED] {context} -> {text}", flush=True)
 
 
 async def publish_json(client, topic, payload, retain=False):
@@ -235,14 +301,19 @@ async def publish_live_preview(client, events):
     for ev in preview_events:
         home = ev.get("homeTeam", {}).get("name", "HOME")
         away = ev.get("awayTeam", {}).get("name", "AWAY")
+        country, league = get_tournament_info(ev)
         item = {
             "id": ev.get("id"),
+            "country": country,
+            "league": league,
             "home": home,
             "away": away,
             "score": get_score(ev),
             "status": get_status_text(ev),
             "line": format_event(ev, include_status=True),
-            "display": format_display_event(ev),
+            "display_context": format_context_event(ev),
+            "display_score": format_score_event(ev),
+            "display": format_full_display_event(ev),
         }
         items.append(item)
 
@@ -250,7 +321,8 @@ async def publish_live_preview(client, events):
         "type": "live_preview",
         "count": len(events),
         "shown": len(items),
-        "display_mode": "rotate_static",
+        "display_mode": "league_then_score_static",
+        "context_seconds": CONTEXT_SECONDS,
         "display_seconds": DISPLAY_SECONDS,
         "matches": items,
     }
@@ -285,7 +357,7 @@ async def detect_live_score_changes(events):
             continue
 
         if old_score is not None and old_score != score:
-            enqueue_priority_message(f"GOAL {format_display_event(ev)}")
+            enqueue_priority_event(ev, prefix="GOAL")
             print(f"[SCORE CHANGE] {key}: {old_score} -> {score}", flush=True)
 
     # remove finished/disappeared live events from score memory
@@ -315,8 +387,19 @@ async def show_text_for_seconds(client, text, seconds, interruptible=True):
     return True
 
 
-async def show_priority_text(client, text):
-    print(f"[DISPLAY PRIORITY] {text}", flush=True)
+async def show_priority_text(client, message):
+    if isinstance(message, tuple):
+        context, text = message
+    else:
+        context, text = None, message
+
+    print(f"[DISPLAY PRIORITY] {context or ''} {text}", flush=True)
+
+    if context:
+        await publish_led(client, context, retain=True)
+        await asyncio.sleep(CONTEXT_SECONDS)
+        await publish_led(client, " ", retain=True)
+        await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
     for _ in range(BLINK_COUNT):
         await publish_led(client, text, retain=True)
@@ -340,9 +423,9 @@ async def display_live_rotation(client):
             continue
 
         if priority_messages:
-            text = priority_messages.popleft()
+            message = priority_messages.popleft()
             priority_signal.clear()
-            await show_priority_text(client, text)
+            await show_priority_text(client, message)
             continue
 
         events = list(current_live_events)
@@ -359,18 +442,33 @@ async def display_live_rotation(client):
         if index >= len(events):
             index = 0
 
-        text = format_display_event(events[index])
-        print(f"[DISPLAY ROTATE] {index + 1}/{len(events)} {text}", flush=True)
+        ev = events[index]
+        context_text = format_context_event(ev)
+        score_text = format_score_event(ev)
+        print(f"[DISPLAY ROTATE] {index + 1}/{len(events)} {context_text} -> {score_text}", flush=True)
         index += 1
 
-        completed = await show_text_for_seconds(
+        context_completed = await show_text_for_seconds(
             client,
-            text,
+            context_text,
+            CONTEXT_SECONDS,
+            interruptible=True,
+        )
+
+        if not context_completed:
+            continue
+
+        await publish_led(client, " ", retain=True)
+        await asyncio.sleep(BLANK_BETWEEN_SECONDS)
+
+        score_completed = await show_text_for_seconds(
+            client,
+            score_text,
             DISPLAY_SECONDS,
             interruptible=True,
         )
 
-        if completed:
+        if score_completed:
             await publish_led(client, " ", retain=True)
             await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
@@ -508,7 +606,7 @@ async def process_team(session, client, team, events):
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
-            enqueue_priority_message(f"GOAL {short_name(home)} {score} {short_name(away)}")
+            enqueue_priority_event(ev, prefix="GOAL")
 
         period_key = f"{event_id}:{status_type}:{status_desc}"
 
@@ -516,10 +614,10 @@ async def process_team(session, client, team, events):
             known_periods.add(period_key)
 
             if "Halftime" in status_desc:
-                enqueue_priority_message(f"HT {short_name(home)} {score} {short_name(away)}")
+                enqueue_priority_event(ev, prefix="HT")
 
             elif "Ended" in status_desc or status_type == "finished":
-                enqueue_priority_message(f"FT {short_name(home)} {score} {short_name(away)}")
+                enqueue_priority_event(ev, prefix="FT")
 
         await handle_incidents(session, client, team, event_id, score)
 
