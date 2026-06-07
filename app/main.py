@@ -1,5 +1,7 @@
 import asyncio
 import json
+from collections import deque
+
 import yaml
 from asyncio_mqtt import Client, MqttError
 from curl_cffi.requests import AsyncSession
@@ -50,13 +52,24 @@ LIVE_PREVIEW_ENABLED = LIVE_PREVIEW.get("enabled", True)
 LIVE_PREVIEW_TOPIC = LIVE_PREVIEW.get("topic", "sports/football/live")
 LIVE_PREVIEW_LIMIT = int(LIVE_PREVIEW.get("limit", 5))
 LIVE_PREVIEW_LED = LIVE_PREVIEW.get("led", True)
+DISPLAY_SECONDS = float(LIVE_PREVIEW.get("display_seconds", 5))
+BLINK_COUNT = int(LIVE_PREVIEW.get("blink_count", 3))
+BLINK_INTERVAL = float(LIVE_PREVIEW.get("blink_interval", 0.35))
+BLANK_BETWEEN_SECONDS = float(LIVE_PREVIEW.get("blank_between_seconds", 0.25))
+MAX_DISPLAY_CHARS = int(LIVE_PREVIEW.get("max_display_chars", 32))
+SHOW_STATUS_ON_LED = LIVE_PREVIEW.get("show_status_on_led", False)
+NO_LIVE_TEXT = LIVE_PREVIEW.get("no_live_text", "BRAK MECZOW LIVE")
 
 last_scores = {}
+last_all_live_scores = {}
 known_incidents = set()
 known_periods = set()
 initialized_events = set()
-last_live_preview_text = None
+current_live_events = []
+priority_messages = deque()
+priority_signal = asyncio.Event()
 sofascore_session_ready = False
+live_scores_initialized = False
 
 SHORT_NAMES = {
     "Juventus": "JUV",
@@ -65,13 +78,24 @@ SHORT_NAMES = {
     "Lech Poznan": "LPO",
     "AC Milan": "MIL",
     "Cagliari": "CAG",
+    "Ecuador": "ECU",
+    "Guatemala": "GUA",
 }
 
 
 def short_name(name):
     if not name:
         return "???"
-    return SHORT_NAMES.get(name, name.upper()[:3])
+
+    clean = name.replace("Club Atletico", "CA").replace("Atlético", "Atl")
+    return SHORT_NAMES.get(name, clean.upper()[:3])
+
+
+def trim_display(text):
+    text = " ".join(str(text).split())
+    if len(text) <= MAX_DISPLAY_CHARS:
+        return text
+    return text[:MAX_DISPLAY_CHARS].rstrip()
 
 
 def get_score(ev):
@@ -93,10 +117,28 @@ def get_status_text(ev):
     return "live"
 
 
-def format_event(ev):
+def format_event(ev, include_status=True):
     home = ev.get("homeTeam", {}).get("name", "HOME")
     away = ev.get("awayTeam", {}).get("name", "AWAY")
-    return f"{short_name(home)} {get_score(ev)} {short_name(away)} ({get_status_text(ev)})"
+    base = f"{short_name(home)} {get_score(ev)} {short_name(away)}"
+
+    if include_status:
+        return f"{base} ({get_status_text(ev)})"
+    return base
+
+
+def format_display_event(ev):
+    return trim_display(format_event(ev, include_status=SHOW_STATUS_ON_LED))
+
+
+def enqueue_priority_message(text):
+    text = trim_display(text)
+    if not text:
+        return
+
+    priority_messages.append(text)
+    priority_signal.set()
+    print(f"[DISPLAY PRIORITY QUEUED] {text}", flush=True)
 
 
 async def publish_json(client, topic, payload, retain=False):
@@ -116,7 +158,7 @@ async def publish_led(client, text, retain=False):
         qos=1,
         retain=retain
     )
-    print("[MQTT LED]", LED_TOPIC, text, flush=True)
+    print("[MQTT LED]", LED_TOPIC, repr(text), flush=True)
 
 
 async def prepare_sofascore_session(session, force=False):
@@ -184,8 +226,6 @@ async def fetch_live_events(session):
 
 
 async def publish_live_preview(client, events):
-    global last_live_preview_text
-
     if not LIVE_PREVIEW_ENABLED:
         return
 
@@ -201,7 +241,8 @@ async def publish_live_preview(client, events):
             "away": away,
             "score": get_score(ev),
             "status": get_status_text(ev),
-            "line": format_event(ev),
+            "line": format_event(ev, include_status=True),
+            "display": format_display_event(ev),
         }
         items.append(item)
 
@@ -209,6 +250,8 @@ async def publish_live_preview(client, events):
         "type": "live_preview",
         "count": len(events),
         "shown": len(items),
+        "display_mode": "rotate_static",
+        "display_seconds": DISPLAY_SECONDS,
         "matches": items,
     }
 
@@ -218,12 +261,118 @@ async def publish_live_preview(client, events):
         print("[LIVE PREVIEW] no live matches or API returned no data", flush=True)
         return
 
-    text = " | ".join(item["line"] for item in items)
+    text = " | ".join(item["display"] for item in items)
     print(f"[LIVE PREVIEW] {text}", flush=True)
 
-    if LIVE_PREVIEW_LED and text != last_live_preview_text:
-        last_live_preview_text = text
-        await publish_led(client, text[:250], retain=True)
+
+async def detect_live_score_changes(events):
+    global live_scores_initialized
+
+    seen_keys = set()
+
+    for ev in events:
+        event_id = ev.get("id")
+        if not event_id:
+            continue
+
+        key = str(event_id)
+        seen_keys.add(key)
+        score = get_score(ev)
+        old_score = last_all_live_scores.get(key)
+        last_all_live_scores[key] = score
+
+        if not live_scores_initialized:
+            continue
+
+        if old_score is not None and old_score != score:
+            enqueue_priority_message(f"GOAL {format_display_event(ev)}")
+            print(f"[SCORE CHANGE] {key}: {old_score} -> {score}", flush=True)
+
+    # remove finished/disappeared live events from score memory
+    for key in list(last_all_live_scores.keys()):
+        if key not in seen_keys:
+            last_all_live_scores.pop(key, None)
+
+    if not live_scores_initialized:
+        live_scores_initialized = True
+        print(f"[SCORE INIT] initialized {len(last_all_live_scores)} live scores", flush=True)
+
+
+async def show_text_for_seconds(client, text, seconds, interruptible=True):
+    await publish_led(client, text, retain=True)
+
+    if interruptible:
+        try:
+            await asyncio.wait_for(priority_signal.wait(), timeout=seconds)
+            priority_signal.clear()
+            await publish_led(client, " ", retain=True)
+            await asyncio.sleep(BLANK_BETWEEN_SECONDS)
+            return False
+        except asyncio.TimeoutError:
+            return True
+
+    await asyncio.sleep(seconds)
+    return True
+
+
+async def show_priority_text(client, text):
+    print(f"[DISPLAY PRIORITY] {text}", flush=True)
+
+    for _ in range(BLINK_COUNT):
+        await publish_led(client, text, retain=True)
+        await asyncio.sleep(BLINK_INTERVAL)
+        await publish_led(client, " ", retain=True)
+        await asyncio.sleep(BLINK_INTERVAL)
+
+    await publish_led(client, text, retain=True)
+    await asyncio.sleep(DISPLAY_SECONDS)
+    await publish_led(client, " ", retain=True)
+    await asyncio.sleep(BLANK_BETWEEN_SECONDS)
+
+
+async def display_live_rotation(client):
+    index = 0
+    last_no_live_sent = False
+
+    while True:
+        if not LIVE_PREVIEW_LED:
+            await asyncio.sleep(1)
+            continue
+
+        if priority_messages:
+            text = priority_messages.popleft()
+            priority_signal.clear()
+            await show_priority_text(client, text)
+            continue
+
+        events = list(current_live_events)
+
+        if not events:
+            if not last_no_live_sent:
+                await publish_led(client, trim_display(NO_LIVE_TEXT), retain=True)
+                last_no_live_sent = True
+            await asyncio.sleep(5)
+            continue
+
+        last_no_live_sent = False
+
+        if index >= len(events):
+            index = 0
+
+        text = format_display_event(events[index])
+        print(f"[DISPLAY ROTATE] {index + 1}/{len(events)} {text}", flush=True)
+        index += 1
+
+        completed = await show_text_for_seconds(
+            client,
+            text,
+            DISPLAY_SECONDS,
+            interruptible=True,
+        )
+
+        if completed:
+            await publish_led(client, " ", retain=True)
+            await asyncio.sleep(BLANK_BETWEEN_SECONDS)
 
 
 async def preload_incidents(session, event_id):
@@ -276,9 +425,7 @@ async def handle_incidents(session, client, team, event_id, score):
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/goal", payload)
-
-            led = f"GOAL {short_name(goal_team)} {score}"
-            await publish_led(client, led)
+            enqueue_priority_message(f"GOAL {short_name(goal_team)} {score}")
 
         elif inc_type == "card":
             color = inc.get("color", "yellow")
@@ -297,8 +444,7 @@ async def handle_incidents(session, client, team, event_id, score):
             await publish_json(client, f"{team['mqtt_prefix']}/card", payload)
 
             if color == "red":
-                led = f"RED {short_name(card_team)} {minute}'"
-                await publish_led(client, led)
+                enqueue_priority_message(f"RED {short_name(card_team)} {minute}'")
 
 
 async def process_team(session, client, team, events):
@@ -343,10 +489,6 @@ async def process_team(session, client, team, events):
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
-
-            led = f"{short_name(home)} {score} {short_name(away)}"
-            await publish_led(client, led, retain=True)
-
             await preload_incidents(session, event_id)
 
             print(f"[INIT] {home} {score} {away}", flush=True)
@@ -366,9 +508,7 @@ async def process_team(session, client, team, events):
             }
 
             await publish_json(client, f"{team['mqtt_prefix']}/live", payload)
-
-            led = f"{short_name(home)} {score} {short_name(away)}"
-            await publish_led(client, led, retain=True)
+            enqueue_priority_message(f"GOAL {short_name(home)} {score} {short_name(away)}")
 
         period_key = f"{event_id}:{status_type}:{status_desc}"
 
@@ -376,15 +516,31 @@ async def process_team(session, client, team, events):
             known_periods.add(period_key)
 
             if "Halftime" in status_desc:
-                await publish_led(client, f"HT {short_name(home)} {score} {short_name(away)}")
+                enqueue_priority_message(f"HT {short_name(home)} {score} {short_name(away)}")
 
             elif "Ended" in status_desc or status_type == "finished":
-                await publish_led(client, f"FT {short_name(home)} {score} {short_name(away)}")
+                enqueue_priority_message(f"FT {short_name(home)} {score} {short_name(away)}")
 
         await handle_incidents(session, client, team, event_id, score)
 
     if not found:
         print(f"[INFO] no live match for {team['name']}", flush=True)
+
+
+async def poll_loop(session, client):
+    global current_live_events
+
+    while True:
+        events = await fetch_live_events(session)
+        current_live_events = events
+
+        await publish_live_preview(client, events)
+        await detect_live_score_changes(events)
+
+        for team in TEAMS:
+            await process_team(session, client, team, events)
+
+        await asyncio.sleep(POLL_INTERVAL)
 
 
 async def main():
@@ -402,14 +558,16 @@ async def main():
                 print(f"Connected to MQTT {MQTT_HOST}:{MQTT_PORT}", flush=True)
 
                 async with AsyncSession(impersonate="chrome124", timeout=15) as session:
-                    while True:
-                        events = await fetch_live_events(session)
-                        await publish_live_preview(client, events)
+                    display_task = asyncio.create_task(display_live_rotation(client))
 
-                        for team in TEAMS:
-                            await process_team(session, client, team, events)
-
-                        await asyncio.sleep(POLL_INTERVAL)
+                    try:
+                        await poll_loop(session, client)
+                    finally:
+                        display_task.cancel()
+                        try:
+                            await display_task
+                        except asyncio.CancelledError:
+                            pass
 
         except MqttError as e:
             print("[MQTT ERROR]", e, flush=True)
