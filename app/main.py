@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+import unicodedata
 from collections import deque
 
 import yaml
@@ -66,7 +68,9 @@ DISPLAY_WIDTH_CHARS = int(LIVE_PREVIEW.get("display_width_chars", 16))
 STATIC_HOLD_SECONDS = float(LIVE_PREVIEW.get("static_hold_seconds", 3))
 SCROLL_CHARS_PER_SECOND = float(LIVE_PREVIEW.get("scroll_chars_per_second", 5))
 SCROLL_END_PAUSE_SECONDS = float(LIVE_PREVIEW.get("scroll_end_pause_seconds", 1))
-USE_FULL_TEAM_NAMES = LIVE_PREVIEW.get("use_full_team_names", True)
+# For LED we now default to 3-letter team abbreviations, e.g. LEC 1:0 LEG.
+USE_FULL_TEAM_NAMES = LIVE_PREVIEW.get("use_full_team_names", False)
+LEAGUE_MAX_CHARS = int(LIVE_PREVIEW.get("league_max_chars", DISPLAY_WIDTH_CHARS))
 
 last_scores = {}
 last_all_live_scores = {}
@@ -82,8 +86,9 @@ live_scores_initialized = False
 SHORT_NAMES = {
     "Juventus": "JUV",
     "Torino": "TOR",
-    "Lech Poznań": "LPO",
-    "Lech Poznan": "LPO",
+    "Lech Poznań": "LEC",
+    "Lech Poznan": "LEC",
+    "Legia Warszawa": "LEG",
     "AC Milan": "MIL",
     "Cagliari": "CAG",
     "Ecuador": "ECU",
@@ -107,20 +112,111 @@ COUNTRY_NAMES_PL = {
     "World": "SWIAT",
 }
 
+LEAGUE_SHORT_NAMES = {
+    "Primera B Nacional": "PRIMERA B",
+    "Primera Nacional": "PRIMERA B",
+    "Liga Profesional de Fútbol": "LIGA ARG",
+    "Liga Profesional": "LIGA ARG",
+    "Int. Friendly Games": "TOWARZYSKI",
+    "International Friendly Games": "TOWARZYSKI",
+    "Club Friendly Games": "SPARING",
+    "Puchar Polski": "PUCHAR PL",
+    "Ekstraklasa": "EKSTRAKLASA",
+    "I Liga": "I LIGA",
+    "II Liga": "II LIGA",
+}
+
+TEAM_PREFIX_STOPWORDS = {
+    "AC", "AFC", "CA", "CD", "CF", "CS", "FC", "FK", "IF", "NK", "SC", "SK", "TS",
+    "CLUB", "ATLETICO", "ATLÉTICO", "ATHLETIC", "DE", "DEL", "DA", "DO", "DOS", "THE",
+}
+
+LEAGUE_WORDS_TO_REMOVE = {
+    "NACIONAL", "NATIONAL", "PROFESIONAL", "PROFESSIONAL", "CHAMPIONSHIP", "TOURNAMENT",
+    "LEAGUE", "LIGA", "DE", "DEL", "DA", "DO", "DOS", "THE", "FOOTBALL", "FUTBOL", "FÚTBOL",
+}
+
+
+def strip_accents(text):
+    text = str(text or "")
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def normalize_display(text):
+    text = " ".join(str(text or "").split())
+    if MAX_DISPLAY_CHARS > 0 and len(text) > MAX_DISPLAY_CHARS:
+        return text[:MAX_DISPLAY_CHARS].rstrip()
+    return text
+
+
+def clean_token(token):
+    token = strip_accents(token)
+    token = re.sub(r"[^A-Za-z0-9]", "", token)
+    return token.upper()
+
 
 def short_name(name):
     if not name:
         return "???"
 
-    clean = name.replace("Club Atletico", "CA").replace("Atlético", "Atl")
-    return SHORT_NAMES.get(name, clean.upper()[:3])
+    if name in SHORT_NAMES:
+        return SHORT_NAMES[name]
+
+    cleaned = str(name)
+    cleaned = re.sub(r"\bClub\s+Atl[eé]tico\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bAtl[eé]tico\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bClub\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("&", " ").replace("-", " ")
+
+    tokens = [clean_token(t) for t in cleaned.split()]
+    tokens = [t for t in tokens if t and t not in TEAM_PREFIX_STOPWORDS]
+
+    if not tokens:
+        tokens = [clean_token(t) for t in str(name).split() if clean_token(t)]
+
+    if not tokens:
+        return "???"
+
+    token = tokens[0]
+    if len(token) >= 3:
+        return token[:3]
+
+    if len(tokens) > 1:
+        joined = "".join(tokens)
+        return joined[:3].ljust(3, "?")
+
+    return token[:3].ljust(3, "?")
 
 
-def normalize_display(text):
-    text = " ".join(str(text).split())
-    if MAX_DISPLAY_CHARS > 0 and len(text) > MAX_DISPLAY_CHARS:
-        return text[:MAX_DISPLAY_CHARS].rstrip()
-    return text
+def compact_league_name(name):
+    name = normalize_display(name or "Liga")
+
+    if name in LEAGUE_SHORT_NAMES:
+        return LEAGUE_SHORT_NAMES[name]
+
+    limit = max(6, LEAGUE_MAX_CHARS)
+    if len(name) <= limit:
+        return name
+
+    ascii_name = strip_accents(name)
+    words = re.split(r"\s+", ascii_name.replace(".", ""))
+    useful = []
+
+    for word in words:
+        token = clean_token(word)
+        if not token or token in LEAGUE_WORDS_TO_REMOVE:
+            continue
+        useful.append(word.upper()[:8])
+
+    compact = " ".join(useful[:2]).strip()
+    if not compact:
+        compact = ascii_name.upper()
+
+    if len(compact) > limit:
+        compact = compact[:limit].rstrip()
+
+    return compact or name[:limit]
 
 
 def calculate_display_seconds(text, minimum_seconds):
@@ -153,9 +249,10 @@ def get_tournament_info(ev):
     tournament = ev.get("tournament", {}) or {}
     category = tournament.get("category", {}) or {}
 
-    league = tournament.get("name") or tournament.get("uniqueTournament", {}).get("name") or "Liga"
+    league_raw = tournament.get("name") or tournament.get("uniqueTournament", {}).get("name") or "Liga"
     country = category.get("name") or category.get("country", {}).get("name") or ""
     country = COUNTRY_NAMES_PL.get(country, country.upper() if country else "")
+    league = compact_league_name(league_raw)
 
     return normalize_display(country or "INNE"), normalize_display(league or "Liga")
 
@@ -318,6 +415,8 @@ async def publish_live_preview(client, events):
             "league": league,
             "home": home,
             "away": away,
+            "home_short": short_name(home),
+            "away_short": short_name(away),
             "score": get_score(ev),
             "status": get_status_text(ev),
             "line": format_event(ev, include_status=True),
@@ -336,10 +435,10 @@ async def publish_live_preview(client, events):
         "type": "live_preview",
         "count": len(events),
         "shown": len(items),
-        "display_mode": "country_then_league_then_score_separate",
+        "display_mode": "country_then_short_league_then_short_score",
         "display_width_chars": DISPLAY_WIDTH_CHARS,
-        "static_hold_seconds": STATIC_HOLD_SECONDS,
-        "scroll_chars_per_second": SCROLL_CHARS_PER_SECOND,
+        "league_max_chars": LEAGUE_MAX_CHARS,
+        "team_mode": "short_3_letters",
         "matches": items,
     }
 
