@@ -8,8 +8,28 @@ led:
   topic: "all"
 
 teams:
-  - id: 2687
-    name: "Juventus"
-    mqtt_prefix: "sports/football/test"
+  - name: "Lech Poznań"
+    mqtt_prefix: "sports/football/lech"
 
+live_preview:
+  enabled: true
+  topic: "sports/football/live"
+  led: true
+  limit: 5
+  filter_display_events: true
+  display_width_chars: 16
+  country_seconds: 3
+  league_seconds: 3
+  display_seconds: 5
+  no_live_text: "brak meczow live"
+
+reminders:
+  enabled: true
+  topic: "sports/football/lech/reminder"
+  next_match_topic: "sports/football/lech/next"
+  days_before: 1
+  check_interval_seconds: 3600
+  repeat_seconds: 43200
+
+timezone: "Europe/Warsaw"
 poll_interval: 15
